@@ -72,30 +72,12 @@ def product_list_api(request):
 @transaction.atomic
 def register_order(request):
     serializer = OrderSerializer(data=request.data)
-    serializer.is_valid(raise_exception=True)  # ✅ вот это изменение
+    serializer.is_valid(raise_exception=True)
 
-    try:
-        order = Order.objects.create(
-            firstname=serializer.validated_data['firstname'],
-            lastname=serializer.validated_data['lastname'],
-            phonenumber=serializer.validated_data['phonenumber'],
-            address=serializer.validated_data['address'],
-        )
+    order = serializer.save() 
+    serialized_info = OrderSerializer(order).data
 
-        order_product_fields = serializer.validated_data['products']
-        order_products = [
-            OrderProducts(order=order, **fields) for fields in order_product_fields
-        ]
-        OrderProducts.objects.bulk_create(order_products)
-
-        serialized_info = serializer.data
-        serialized_info['id'] = order.id
-
-        return Response(serialized_info, status=status.HTTP_201_CREATED)
-
-    except Exception as e:
-        print(f"Error in transaction: {e}")
-        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(serialized_info, status=status.HTTP_201_CREATED)
 
 
 @api_view(['GET'])
