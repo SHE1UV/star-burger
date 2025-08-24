@@ -82,7 +82,6 @@ def register_order(request):
 
 @api_view(['GET'])
 def model_response_order(request):
-    if request.method == 'GET':
-        order = Order.objects.all()
-        serializer = OrderSerializer(order, many=True)
-        return Response(serializer.data)
+    order = Order.objects.all()
+    serializer = OrderSerializer(order, many=True)
+    return Response(serializer.data)
