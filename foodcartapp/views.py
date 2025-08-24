@@ -12,7 +12,6 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.serializers import ValidationError
 from rest_framework.renderers import JSONRenderer
-from pprint import pprint
 from django.db import transaction
 
 
@@ -73,7 +72,6 @@ def product_list_api(request):
 @transaction.atomic 
 def register_order(request):
     order_info = request.data
-    pprint(order_info)
 
     serializer = OrderSerializer(data=order_info)
     if serializer.is_valid():
