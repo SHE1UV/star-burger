@@ -201,7 +201,7 @@ class Order(models.Model):
     PAYMENT_METHODS = [
         ('C', 'Наличными'),
         ('E', 'Электронный'),
-        ('K', 'Катртой'),
+        ('K', 'Картой'),
     ]
 
     payment_method = models.CharField(
