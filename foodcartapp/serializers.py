@@ -1,6 +1,4 @@
 from rest_framework import serializers
-from rest_framework.serializers import ListField
-
 from .models import Order, OrderProducts
 
 
@@ -11,12 +9,19 @@ class OrderProductsSerializer(serializers.ModelSerializer):
 
 
 class OrderSerializer(serializers.ModelSerializer):
-    products = ListField(
-        child = OrderProductsSerializer(),
-        allow_empty=False,
-        write_only=True
-    )
+    products = OrderProductsSerializer(many=True, write_only=True)  # вложенный сериализатор
 
     class Meta:
         model = Order
-        fields = '__all__'
+        fields = ['id', 'firstname', 'lastname', 'phonenumber', 'address', 'products']
+
+    def create(self, validated_data):
+        products = validated_data.pop('products')   # достаём продукты
+        order = Order.objects.create(**validated_data)
+
+        order_products = [
+            OrderProducts(order=order, **product) for product in products
+        ]
+        OrderProducts.objects.bulk_create(order_products)
+
+        return order
