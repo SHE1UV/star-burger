@@ -1,24 +1,20 @@
 import requests
-import datetime
 import logging
 
 from geopy import distance
 from operator import itemgetter
-from django.core.exceptions import ObjectDoesNotExist
 
 from django import forms
 from django.shortcuts import redirect, render
 from django.views import View
 from django.urls import reverse_lazy
 from django.contrib.auth.decorators import user_passes_test
-from django.utils import timezone
-
 from django.contrib.auth import authenticate, login
 from django.contrib.auth import views as auth_views
 from django.conf import settings
 
 from foodcartapp.models import Product, Restaurant, Order
-from geoinfostore.models import GeocodingAddresses
+from geoinfostore.models import Address  
 
 
 class Login(forms.Form):
@@ -41,9 +37,7 @@ class Login(forms.Form):
 class LoginView(View):
     def get(self, request, *args, **kwargs):
         form = Login()
-        return render(request, "login.html", context={
-            'form': form
-        })
+        return render(request, "login.html", context={'form': form})
 
     def post(self, request):
         form = Login(request.POST)
@@ -55,7 +49,7 @@ class LoginView(View):
             user = authenticate(request, username=username, password=password)
             if user:
                 login(request, user)
-                if user.is_staff:  # FIXME replace with specific permission
+                if user.is_staff: # FIXME replace with specific permission
                     return redirect("restaurateur:RestaurantView")
                 return redirect("start_page")
 
@@ -80,14 +74,17 @@ def view_products(request):
 
     products_with_restaurant_availability = []
     for product in products:
-        availability = {item.restaurant_id: item.availability for item in product.menu_items.all()}
+        availability = {
+            item.restaurant_id: item.availability
+            for item in product.menu_items.all()
+        }
         ordered_availability = [availability.get(restaurant.id, False) for restaurant in restaurants]
 
         products_with_restaurant_availability.append(
             (product, ordered_availability)
         )
 
-    return render(request, template_name="products_list.html", context={
+    return render(request, "products_list.html", context={
         'products_with_restaurant_availability': products_with_restaurant_availability,
         'restaurants': restaurants,
     })
@@ -95,26 +92,13 @@ def view_products(request):
 
 @user_passes_test(is_manager, login_url='restaurateur:login')
 def view_restaurants(request):
-    return render(request, template_name="restaurants_list.html", context={
+    return render(request, "restaurants_list.html", context={
         'restaurants': Restaurant.objects.all(),
     })
 
 
-def get_db_coords(address):
-    try:
-        entry = GeocodingAddresses.objects.get(first_address=address)
-        return (entry.first_address_latitude, entry.first_address_longitude)
-    except ObjectDoesNotExist:
-        pass
-    try:
-        entry = GeocodingAddresses.objects.get(second_address=address)
-        return (entry.second_address_latitude, entry.second_address_longitude)
-    except ObjectDoesNotExist:
-        pass
-    return None
-
-
 def get_geo_objects(apikey, address):
+    """Запрашивает геообъекты у Яндекс.Карт"""
     response = requests.get("https://geocode-maps.yandex.ru/1.x", params={
         "geocode": address,
         "apikey": apikey,
@@ -126,97 +110,38 @@ def get_geo_objects(apikey, address):
     return feature_members
 
 
-def update_or_create_db(
-        first_address, 
-        second_address, 
-        first_coords, 
-        second_coords, 
-        distance_km
-    ):
-    object, created = GeocodingAddresses.objects.update_or_create(
-        first_address=first_address,
-        second_address=second_address,
-        defaults={
-            'first_address_latitude': first_coords[0],
-            'first_address_longitude': first_coords[1],
-            'second_address_latitude': second_coords[0],
-            'second_address_longitude': second_coords[1],
-            'distance': distance_km,
-            'last_updated': timezone.now()
-        }
-    )
-    return object
+def get_or_create_address(apikey, address):
+    """Возвращает координаты адреса (берёт из БД или запрашивает у API)"""
+    obj, created = Address.objects.get_or_create(raw_address=address)
+
+    if not obj.latitude or not obj.longitude:
+        geo_objects = get_geo_objects(apikey, address)
+        if not geo_objects:
+            logging.warning(f'Не удалось найти координаты для адреса: {address}')
+            return None
+
+        geo_object = geo_objects[0]['GeoObject']['Point']['pos']
+        lon_str, lat_str = geo_object.split()
+        obj.latitude, obj.longitude = lat_str, lon_str
+        obj.save()
+
+    return (obj.latitude, obj.longitude)
 
 
 def distance_calculation(apikey, first_address, second_address):
-
-    def get_distance_by_coords(first_coords, second_coords):
-        return distance.distance(
-            (float(first_coords[0]), float(first_coords[1])),
-            (float(second_coords[0]), float(second_coords[1]))
-        ).km
-
-    def get_coordinates(apikey, address, coords_db):
-        coordinates = coords_db(address)
-
-        if not coordinates:
-            geo_objects = get_geo_objects(apikey, address)
-            if not geo_objects:
-                logging.exception(f'Ошибка при загрузке геообъектов для адреса: {address}')
-                return None
-
-            geo_object = geo_objects[0]['GeoObject']['Point']['pos']
-            lon_str, lat_str = geo_object.split()
-            coordinates = (lat_str, lon_str)
-
-        return coordinates
-
-    update_period = timezone.timedelta(days=7)
-
-    geocoding_addresses = GeocodingAddresses.objects.filter(
-        first_address=first_address,
-        second_address=second_address
-    ).first()
-
-    if geocoding_addresses and (
-        timezone.now() - geocoding_addresses.last_updated
-    ) < update_period:
-        return geocoding_addresses.distance
-
-    first_coords = get_db_coords(first_address)
-    second_coords = get_db_coords(second_address)
-
-    if first_coords and second_coords:
-        distance_km = get_distance_by_coords(first_coords, second_coords)
-        if geocoding_addresses:
-            update_or_create_db(
-                first_address, 
-                second_address, 
-                first_coords, 
-                second_coords, 
-                distance_km
-            )
-        return distance_km
-
-    first_coordinates = get_coordinates(apikey, first_address, first_coords)
-    if first_coordinates is None:
+    """Считает расстояние между двумя адресами в км"""
+    first_coords = get_or_create_address(apikey, first_address)
+    if not first_coords:
         return None
 
-    second_coordinates = get_coordinates(apikey, second_address, second_coords)
-    if second_coordinates is None:
+    second_coords = get_or_create_address(apikey, second_address)
+    if not second_coords:
         return None
 
-    distance_km = get_distance_by_coords(first_coords, second_coords)
-
-    update_or_create_db(
-        first_address, 
-        second_address, 
-        first_coords, 
-        second_coords, 
-        distance_km
-    )
-
-    return distance_km
+    return distance.distance(
+        (float(first_coords[0]), float(first_coords[1])),
+        (float(second_coords[0]), float(second_coords[1]))
+    ).km
 
 
 @user_passes_test(is_manager, login_url='restaurateur:login')
@@ -227,20 +152,20 @@ def view_orders(request):
         Order.objects
         .with_total_price()
         .select_related('restaurant')
-        .prefetch_related(
-            'orderproducts__product'
-        )
+        .prefetch_related('orderproducts__product')
     )
 
-    restaurants = list(Restaurant.objects.all().prefetch_related('menu_items__product'))
+    restaurants = list(
+        Restaurant.objects.all().prefetch_related('menu_items__product')
+    )
 
     restaurant_products_map = {}
     for restaurant in restaurants:
-        available_products = set(
+        available_products = {
             item.product.name
             for item in restaurant.menu_items.all()
             if item.availability
-        )
+        }
         restaurant_products_map[restaurant.id] = available_products
 
     order_items = []
@@ -254,18 +179,18 @@ def view_orders(request):
 
         elif not order.restaurant:
             order_products = order.orderproducts.all()
-            product_names = set(p.product.name for p in order_products)
+            product_names = {p.product.name for p in order_products}
 
             capable_restaurants = []
 
             for restaurant in restaurants:
                 restaurant_products = restaurant_products_map.get(restaurant.id, set())
 
-                distance_from_restaurantorder_from_restaurant = None
-
+                distance_from_restaurant = None
                 restaurant_address = restaurant.address
+
                 if restaurant_address and order_address:
-                    distance_from_restaurantorder_from_restaurant = distance_calculation(
+                    distance_from_restaurant = distance_calculation(
                         yandex_api_key,
                         restaurant_address,
                         order_address
@@ -273,7 +198,7 @@ def view_orders(request):
 
                 if product_names.issubset(restaurant_products):
                     capable_restaurants.append(
-                        (f'{restaurant.name}', distance_from_restaurantorder_from_restaurant)
+                        (restaurant.name, distance_from_restaurant)
                     )
 
             sorted_capable_restaurants = sorted(
@@ -285,7 +210,6 @@ def view_orders(request):
             for name, dist in sorted_capable_restaurants:
                 if dist is not None:
                     formatted_capable_restaurants.append(f"{name} - {dist:.2f} км")
-
                 else:
                     formatted_capable_restaurants.append(name)
 
